@@ -1,5 +1,4 @@
 services:
-  # ─── PostgreSQL ───────────────────────────────────────────────
   postgres:
     image: postgres:16-alpine
     container_name: parily_postgres
@@ -18,7 +17,6 @@ services:
       timeout: 5s
       retries: 5
 
-  # ─── MongoDB ─────────────────────────────────────────────────
   mongodb:
     image: mongo:7
     container_name: parily_mongodb
@@ -33,7 +31,6 @@ services:
       timeout: 5s
       retries: 5
 
-  # ─── Redis ───────────────────────────────────────────────────
   redis:
     image: redis:7-alpine
     container_name: parily_redis
@@ -48,7 +45,6 @@ services:
       timeout: 5s
       retries: 5
 
-  # ─── Backend ─────────────────────────────────────────────────
   backend:
     build:
       context: ./backend
@@ -67,7 +63,6 @@ services:
       redis:
         condition: service_healthy
 
-# ─── Volumes ─────────────────────────────────────────────────
 volumes:
   postgres_data:
   mongo_data:
