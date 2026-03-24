@@ -9,12 +9,14 @@ import (
 	_ "github.com/golang-migrate/migrate/v4/database/postgres"
 	_ "github.com/golang-migrate/migrate/v4/source/file"
 	"go.uber.org/zap"
+
 	"parily.dev/app/internal/config"
 	"parily.dev/app/internal/health"
 	"parily.dev/app/internal/logger"
 	"parily.dev/app/internal/mongo"
 	"parily.dev/app/internal/postgres"
 	"parily.dev/app/internal/redis"
+	wshandler "parily.dev/app/internal/websocket"
 )
 
 func main() {
@@ -66,7 +68,6 @@ func main() {
 	if err != nil {
 		logger.Log.Fatal("Failed to initialize migrations", zap.Error(err))
 	}
-
 	if err := m.Up(); err != nil && err != migrate.ErrNoChange {
 		logger.Log.Fatal("Failed to run migrations", zap.Error(err))
 	} else if err == migrate.ErrNoChange {
@@ -75,11 +76,20 @@ func main() {
 		logger.Log.Info("Migrations applied successfully")
 	}
 
+	// --- WebSocket Hub ---
+	// Hub manages the rooms map and Redis pub/sub lifecycle.
+	hub := wshandler.NewHub(redisClient)
+	wsHandler := wshandler.NewHandler(hub)
+
 	r := gin.New()
 	r.Use(gin.Recovery())
 
 	r.GET("/health/live", health.Live)
 	r.GET("/health/ready", health.Ready(pgPool, mongoDB, redisClient))
+
+	// WebSocket endpoint — the entire real-time layer lives here.
+	// GET /ws?room=test
+	r.GET("/ws", wsHandler.ServeWS)
 
 	logger.Log.Info("Server listening", zap.String("port", cfg.ServerPort))
 	if err := r.Run(":" + cfg.ServerPort); err != nil {
