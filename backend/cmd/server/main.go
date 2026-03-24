@@ -89,7 +89,7 @@ func main() {
 
 	// WebSocket endpoint — the entire real-time layer lives here.
 	// GET /ws?room=test
-	r.GET("/ws", wsHandler.ServeWS)
+	r.GET("/ws/:room", wsHandler.ServeWS)
 
 	logger.Log.Info("Server listening", zap.String("port", cfg.ServerPort))
 	if err := r.Run(":" + cfg.ServerPort); err != nil {

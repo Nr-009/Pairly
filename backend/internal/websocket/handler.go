@@ -26,11 +26,10 @@ func NewHandler(hub *Hub) *Handler {
 }
 
 func (h *Handler) ServeWS(c *gin.Context) {
-	roomID := c.Query("room")
+	roomID := c.Param("room")
 	if roomID == "" {
-		roomID = "test"
-	}
-
+    	roomID = "test"
+	}	
 	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
 		logger.Log.Error("ws: upgrade failed", zap.Error(err))
