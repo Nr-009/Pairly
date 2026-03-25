@@ -1,65 +1,80 @@
 package websocket
 
 import (
-	"context"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-	gorws "github.com/gorilla/websocket"
+	"github.com/gorilla/websocket"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
 
-	"parily.dev/app/internal/logger"
+	"parily.dev/app/internal/auth"
+	"parily.dev/app/internal/config"
+	pg "parily.dev/app/internal/postgres"
 )
 
-var upgrader = gorws.Upgrader{
-	ReadBufferSize:  4096,
-	WriteBufferSize: 4096,
-	CheckOrigin:     func(r *http.Request) bool { return true },
+var upgrader = websocket.Upgrader{
+	CheckOrigin: func(r *http.Request) bool { return true },
 }
 
 type Handler struct {
 	hub *Hub
+	db  *pgxpool.Pool
+	cfg *config.Config
+	log *zap.Logger
 }
 
-func NewHandler(hub *Hub) *Handler {
-	return &Handler{hub: hub}
+func NewHandler(hub *Hub, db *pgxpool.Pool, cfg *config.Config, log *zap.Logger) *Handler {
+	return &Handler{hub: hub, db: db, cfg: cfg, log: log}
 }
 
 func (h *Handler) ServeWS(c *gin.Context) {
-	roomID := c.Param("room")
-	if roomID == "" {
-    	roomID = "test"
-	}	
-	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
+	roomID := c.Param("roomId")
+	fileID := c.Param("fileId")
+
+	claims, err := auth.ParseToken(c, h.cfg.JWTSecret)
 	if err != nil {
-		logger.Log.Error("ws: upgrade failed", zap.Error(err))
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 		return
 	}
-	defer conn.Close()
 
-	logger.Log.Info("ws: new connection",
+	role, err := pg.GetMemberRole(c.Request.Context(), h.db, roomID, claims.UserID)
+	if err == pgx.ErrNoRows {
+		c.JSON(http.StatusForbidden, gin.H{"error": "not a member of this room"})
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
+
+	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
+	if err != nil {
+		h.log.Error("ws upgrade failed", zap.Error(err))
+		return
+	}
+
+	h.hub.Register(conn, roomID, fileID)
+	defer h.hub.Unregister(conn, roomID, fileID)
+
+	h.log.Info("ws client connected",
 		zap.String("room", roomID),
-		zap.String("remote", conn.RemoteAddr().String()),
+		zap.String("file", fileID),
+		zap.String("user", claims.UserID),
+		zap.String("role", role),
 	)
 
-	h.hub.Register(roomID, conn)
-	defer h.hub.Unregister(roomID, conn)
-
-	ctx := context.Background()
-
+	// Pure sync loop — no state loading here
+	// Frontend loads persisted state via GET /api/rooms/:roomID/files/:fileID/state
 	for {
-		msgType, msg, err := conn.ReadMessage()
+		msgType, data, err := conn.ReadMessage()
 		if err != nil {
-			if gorws.IsUnexpectedCloseError(err, gorws.CloseGoingAway, gorws.CloseNormalClosure) {
-				logger.Log.Warn("ws: unexpected close", zap.Error(err))
-			}
-			return
+			break
 		}
-
-		if msgType != gorws.BinaryMessage {
+		if role == "viewer" {
 			continue
 		}
-
-		h.hub.Broadcast(ctx, roomID, msg)
+		h.hub.Broadcast(conn, roomID, fileID, msgType, data)
 	}
 }

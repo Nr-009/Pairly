@@ -16,8 +16,17 @@ type Subscription struct {
 	ps *redis.PubSub
 }
 
-func (s *Subscription) Channel() <-chan *redis.Message {
-	return s.ps.Channel()
+// Messages returns the channel of incoming messages.
+func (s *Subscription) Messages() <-chan []byte {
+	raw := s.ps.Channel()
+	out := make(chan []byte)
+	go func() {
+		for msg := range raw {
+			out <- []byte(msg.Payload)
+		}
+		close(out)
+	}()
+	return out
 }
 
 func (s *Subscription) Close() {
@@ -30,20 +39,26 @@ func Connect(cfg *config.Config) (*Client, error) {
 		Password: cfg.RedisPassword,
 		DB:       0,
 	})
-
 	if err := rdb.Ping(context.Background()).Err(); err != nil {
 		return nil, fmt.Errorf("failed to ping redis: %w", err)
 	}
-
 	return &Client{rdb: rdb}, nil
 }
 
-func (c *Client) Publish(ctx context.Context, roomID string, msg []byte) error {
-	return c.rdb.Publish(ctx, "room:"+roomID, msg).Err()
+// Publish sends a message to the given channel key as-is — no prefix added.
+// The hub passes the full key e.g. "room:abc:file:xyz".
+func (c *Client) Publish(channel string, msg []byte) error {
+	return c.rdb.Publish(context.Background(), channel, msg).Err()
 }
 
-func (c *Client) Subscribe(ctx context.Context, roomID string) *Subscription {
-	return &Subscription{ps: c.rdb.Subscribe(ctx, "room:"+roomID)}
+// Subscribe subscribes to the given channel key as-is — no prefix added.
+func (c *Client) Subscribe(channel string) (*Subscription, error) {
+	ps := c.rdb.Subscribe(context.Background(), channel)
+	// Verify the subscription was accepted
+	if _, err := ps.Receive(context.Background()); err != nil {
+		return nil, fmt.Errorf("subscribe: %w", err)
+	}
+	return &Subscription{ps: ps}, nil
 }
 
 func (c *Client) Ping(ctx context.Context) error {
