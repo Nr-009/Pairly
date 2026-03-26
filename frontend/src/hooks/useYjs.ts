@@ -2,20 +2,23 @@ import { useEffect, useRef, useCallback, useState } from "react"
 import * as Y from "yjs"
 import { WebsocketProvider } from "y-websocket"
 import { MonacoBinding } from "y-monaco"
-import { KeyMod, KeyCode } from "monaco-editor"
 import type { editor } from "monaco-editor"
 
 const SAVE_INTERVAL_MS = 60_000
 const SAVE_OP_COUNT    = 100
 
 interface UseYjsOptions {
-  roomId: string
-  fileId: string
-  monacoEditor: editor.IStandaloneCodeEditor | null
+  roomId:        string
+  fileId:        string
+  monacoEditor:  editor.IStandaloneCodeEditor | null
+  currentUserId: string
+  currentName:   string
+  currentColor:  string
 }
 
-export function useYjs({ roomId, fileId, monacoEditor }: UseYjsOptions) {
+export function useYjs({ roomId, fileId, monacoEditor, currentUserId, currentName, currentColor }: UseYjsOptions) {
   const ydocRef         = useRef<Y.Doc | null>(null)
+  const providerRef     = useRef<WebsocketProvider | null>(null)
   const opCountRef      = useRef(0)
   const sendSnapshotRef = useRef<(() => void) | null>(null)
   const [status, setStatus] = useState<"connected" | "disconnected">("disconnected")
@@ -30,8 +33,6 @@ export function useYjs({ roomId, fileId, monacoEditor }: UseYjsOptions) {
     const ytext = ydoc.getText("content")
 
     const init = async () => {
-      // 1. Load persisted state via HTTP and apply to local doc
-      //    before connecting WebSocket so y-websocket sees a populated doc
       try {
         const res = await fetch(
           `${apiUrl}/api/rooms/${roomId}/files/${fileId}/state`,
@@ -48,13 +49,21 @@ export function useYjs({ roomId, fileId, monacoEditor }: UseYjsOptions) {
         console.warn("could not load persisted state:", err)
       }
 
-      // 2. Connect WebSocket — y-websocket handles sync protocol from here
       const provider = new WebsocketProvider(
         wsUrl,
         `ws/${roomId}/${fileId}`,
         ydoc,
         { connect: true }
       )
+
+      providerRef.current = provider
+
+      // Set local awareness state so other users know who we are
+      provider.awareness.setLocalStateField("user", {
+        userId: currentUserId,
+        name:   currentName,
+        color:  currentColor,
+      })
 
       provider.on("status", ({ status: s }: { status: string }) => {
         setStatus(s === "connected" ? "connected" : "disconnected")
@@ -69,7 +78,6 @@ export function useYjs({ roomId, fileId, monacoEditor }: UseYjsOptions) {
 
       ydocRef.current = ydoc
 
-      // 3. Save via HTTP
       const sendSnapshot = () => {
         const state = Y.encodeStateAsUpdate(ydoc)
         if (state.length === 0) return
@@ -88,6 +96,7 @@ export function useYjs({ roomId, fileId, monacoEditor }: UseYjsOptions) {
         opCountRef.current++
         if (opCountRef.current >= SAVE_OP_COUNT) sendSnapshot()
       }
+
       ytext.observe(handleObserve)
 
       const interval = setInterval(() => {
@@ -103,6 +112,7 @@ export function useYjs({ roomId, fileId, monacoEditor }: UseYjsOptions) {
         sendSnapshot()
         provider.destroy()
         ydoc.destroy()
+        providerRef.current     = null
         sendSnapshotRef.current = null
         setStatus("disconnected")
       }
@@ -110,7 +120,6 @@ export function useYjs({ roomId, fileId, monacoEditor }: UseYjsOptions) {
 
     let cleanup: (() => void) | undefined
     init().then((fn) => { cleanup = fn })
-
     return () => { cleanup?.() }
   }, [roomId, fileId, monacoEditor])
 
@@ -118,5 +127,5 @@ export function useYjs({ roomId, fileId, monacoEditor }: UseYjsOptions) {
     sendSnapshotRef.current?.()
   }, [])
 
-  return { status, save }
+  return { status, save, providerRef }
 }

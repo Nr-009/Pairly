@@ -2,27 +2,25 @@ package websocket
 
 import (
 	"sync"
-
 	"github.com/gorilla/websocket"
 	"go.uber.org/zap"
-
 	"parily.dev/app/internal/redis"
 )
 
-// PermissionsHub manages WebSocket connections for permission events.
+// RoomHub manages WebSocket connections for the room channel.
+// Handles all non-Yjs messaging: permission events and presence heartbeats.
 // Each room has a set of connections — one per connected user.
-// When a permission event fires on Redis, it broadcasts to all connections in that room.
-// Completely separate from Hub — different connections, different channels, different purpose.
-type PermissionsHub struct {
+// When any message arrives on Redis, it broadcasts to all connections in that room.
+type RoomHub struct {
 	mu    sync.RWMutex
-	rooms map[string]map[*websocket.Conn]bool // roomID → set of connections
-	subs  map[string]*redis.Subscription      // roomID → Redis subscription
+	rooms map[string]map[*websocket.Conn]bool
+	subs  map[string]*redis.Subscription
 	rdb   *redis.Client
 	log   *zap.Logger
 }
 
-func NewPermissionsHub(rdb *redis.Client, log *zap.Logger) *PermissionsHub {
-	return &PermissionsHub{
+func NewRoomHub(rdb *redis.Client, log *zap.Logger) *RoomHub {
+	return &RoomHub{
 		rooms: make(map[string]map[*websocket.Conn]bool),
 		subs:  make(map[string]*redis.Subscription),
 		rdb:   rdb,
@@ -30,7 +28,7 @@ func NewPermissionsHub(rdb *redis.Client, log *zap.Logger) *PermissionsHub {
 	}
 }
 
-func (h *PermissionsHub) Register(conn *websocket.Conn, roomID string) {
+func (h *RoomHub) Register(conn *websocket.Conn, roomID string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
@@ -39,13 +37,12 @@ func (h *PermissionsHub) Register(conn *websocket.Conn, roomID string) {
 	}
 	h.rooms[roomID][conn] = true
 
-	// First connection in this room — subscribe to Redis permissions channel
 	if h.subs[roomID] == nil {
 		h.subscribeRedis(roomID)
 	}
 }
 
-func (h *PermissionsHub) Unregister(conn *websocket.Conn, roomID string) {
+func (h *RoomHub) Unregister(conn *websocket.Conn, roomID string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
@@ -60,15 +57,21 @@ func (h *PermissionsHub) Unregister(conn *websocket.Conn, roomID string) {
 	}
 }
 
-func (h *PermissionsHub) subscribeRedis(roomID string) {
-	sub, err := h.rdb.Subscribe("room:" + roomID + ":permissions")
+// Publish sends a message to the room channel so Redis fans it out to all pods.
+func (h *RoomHub) Publish(roomID string, msg []byte) error {
+	return h.rdb.Publish("room:"+roomID+":room", msg)
+}
+
+func (h *RoomHub) subscribeRedis(roomID string) {
+	sub, err := h.rdb.Subscribe("room:" + roomID + ":room")
 	if err != nil {
-		h.log.Error("permissions subscribe failed",
+		h.log.Error("room hub subscribe failed",
 			zap.String("room", roomID),
 			zap.Error(err),
 		)
 		return
 	}
+
 	h.subs[roomID] = sub
 
 	go func() {

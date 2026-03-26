@@ -7,31 +7,28 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
-
 	"parily.dev/app/internal/auth"
 	"parily.dev/app/internal/config"
 	pg "parily.dev/app/internal/postgres"
 )
 
-type PermissionsHandler struct {
-	hub *PermissionsHub
+type RoomHandler struct {
+	hub *RoomHub
 	db  *pgxpool.Pool
 	cfg *config.Config
 	log *zap.Logger
 }
 
-func NewPermissionsHandler(hub *PermissionsHub, db *pgxpool.Pool, cfg *config.Config, log *zap.Logger) *PermissionsHandler {
-	return &PermissionsHandler{hub: hub, db: db, cfg: cfg, log: log}
+func NewRoomHandler(hub *RoomHub, db *pgxpool.Pool, cfg *config.Config, log *zap.Logger) *RoomHandler {
+	return &RoomHandler{hub: hub, db: db, cfg: cfg, log: log}
 }
 
-// ServePermissions handles GET /ws/:roomId/permissions
-// Same auth pattern as ServeWS:
-//  1. Validate JWT
-//  2. Check membership
-//  3. Upgrade WebSocket
-//  4. Register in PermissionsHub
-//  5. Read loop (just keeps connection alive — events come from Redis via hub)
-func (h *PermissionsHandler) ServePermissions(c *gin.Context) {
+// ServeRoom handles GET /ws/:roomId/room
+// Validates JWT, checks membership, upgrades to WebSocket, then:
+//   - registers the connection in RoomHub
+//   - reads incoming messages (heartbeats, future types) and publishes to Redis
+//   - Redis fans the message out to all connections in the room via RoomHub
+func (h *RoomHandler) ServeRoom(c *gin.Context) {
 	roomID := c.Param("roomId")
 
 	claims, err := auth.ParseToken(c, h.cfg.JWTSecret)
@@ -52,23 +49,30 @@ func (h *PermissionsHandler) ServePermissions(c *gin.Context) {
 
 	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
-		h.log.Error("permissions ws upgrade failed", zap.Error(err))
+		h.log.Error("room ws upgrade failed", zap.Error(err))
 		return
 	}
 
 	h.hub.Register(conn, roomID)
 	defer h.hub.Unregister(conn, roomID)
 
-	h.log.Info("permissions ws connected",
+	h.log.Info("room ws connected",
 		zap.String("room", roomID),
 		zap.String("user", claims.UserID),
 	)
 
-	// Keep connection alive — events are pushed from Redis via PermissionsHub
-	// Client never sends messages here, only receives
 	for {
-		if _, _, err := conn.ReadMessage(); err != nil {
+		_, data, err := conn.ReadMessage()
+		if err != nil {
 			break
+		}
+
+		if err := h.hub.Publish(roomID, data); err != nil {
+			h.log.Error("room hub publish failed",
+				zap.String("room", roomID),
+				zap.String("user", claims.UserID),
+				zap.Error(err),
+			)
 		}
 	}
 }

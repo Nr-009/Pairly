@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react"
 import { useParams, useNavigate } from "react-router-dom"
 import { useAuth, apiFetch } from "../context/AuthContext"
-import { usePermissions } from "../hooks/usePermissions"
+import { useRoomSocket, getUserColor } from "../hooks/useRoomSocket"
 import { Sidebar } from "../components/Sidebar/sidebar"
 import { Editor } from "../components/Editor/Editor"
 import "./room.css"
@@ -19,16 +19,16 @@ interface Member {
 }
 
 export default function RoomPage() {
-  const { roomId }   = useParams<{ roomId: string }>()
-  const { user }     = useAuth()
-  const navigate     = useNavigate()
+  const { roomId }               = useParams<{ roomId: string }>()
+  const { user, loading: authLoading } = useAuth()
+  const navigate                 = useNavigate()
 
-  const [role, setRole]           = useState<string | null>(null)
-  const [files, setFiles]         = useState<File[]>([])
-  const [members, setMembers]     = useState<Member[]>([])
+  const [role, setRole]             = useState<string | null>(null)
+  const [files, setFiles]           = useState<File[]>([])
+  const [members, setMembers]       = useState<Member[]>([])
   const [activeFile, setActiveFile] = useState<File | null>(null)
-  const [loading, setLoading]     = useState(true)
-  const [error, setError]         = useState("")
+  const [loading, setLoading]       = useState(true)
+  const [error, setError]           = useState("")
 
   useEffect(() => {
     const load = async () => {
@@ -53,10 +53,14 @@ export default function RoomPage() {
     load()
   }, [roomId])
 
-  // Listen for permission changes via dedicated WebSocket
-  usePermissions({
+  const currentUserId = authLoading ? "" : (user?.id ?? "")
+  const currentName   = user?.name ?? user?.email ?? ""
+  const currentColor  = currentUserId ? getUserColor(currentUserId) : "#fff"
+
+  const { onlineUsers } = useRoomSocket({
     roomId:        roomId!,
-    currentUserId: user?.id ?? "",
+    currentUserId,
+    currentName,
     onRoleChanged: (newRole) => setRole(newRole),
   })
 
@@ -89,7 +93,6 @@ export default function RoomPage() {
         </div>
         <span className="room-user">{user?.email}</span>
       </header>
-
       <div className="room-body">
         <Sidebar
           roomId={roomId!}
@@ -97,10 +100,10 @@ export default function RoomPage() {
           activeFile={activeFile}
           members={members}
           currentRole={role}
+          onlineUsers={onlineUsers}
           onFileClick={setActiveFile}
           onMembersChange={setMembers}
         />
-
         <div className="room-editor">
           {role === "viewer" && (
             <div className="room-viewer-banner">
@@ -113,6 +116,9 @@ export default function RoomPage() {
               fileId={activeFile.id}
               role={role as "owner" | "editor" | "viewer"}
               language={activeFile.language}
+              currentUserId={currentUserId}
+              currentName={currentName}
+              currentColor={currentColor}
             />
           )}
         </div>

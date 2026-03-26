@@ -46,7 +46,7 @@ func (h *Handler) RegisterRoutes(rg *gin.RouterGroup) {
 // Uses the existing Publish method — just a different channel string.
 func (h *Handler) publishPermission(roomID string, event map[string]string) {
 	data, _ := json.Marshal(event)
-	h.rdb.Publish("room:"+roomID+":permissions", data)
+	h.rdb.Publish("room:"+roomID+":room", data)
 }
 
 type createRoomRequest struct {

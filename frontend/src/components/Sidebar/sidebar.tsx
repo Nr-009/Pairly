@@ -1,5 +1,7 @@
 import { useState } from "react"
 import { apiFetch } from "../../context/AuthContext"
+import type { OnlineUser } from "../../hooks/useRoomSocket"
+import { MembersList } from "./memberlist"
 import "./sidebar.css"
 
 interface File {
@@ -20,6 +22,7 @@ interface Props {
   activeFile:      File | null
   members:         Member[]
   currentRole:     string
+  onlineUsers:     Map<string, OnlineUser>
   onFileClick:     (file: File) => void
   onMembersChange: (members: Member[]) => void
 }
@@ -30,6 +33,7 @@ export function Sidebar({
   activeFile,
   members,
   currentRole,
+  onlineUsers,
   onFileClick,
   onMembersChange,
 }: Props) {
@@ -39,31 +43,6 @@ export function Sidebar({
   const [inviteRole, setInviteRole]   = useState<"editor" | "viewer">("editor")
   const [inviting, setInviting]       = useState(false)
   const [inviteError, setInviteError] = useState("")
-
-  const handleRoleChange = async (userId: string, newRole: string) => {
-    try {
-      await apiFetch(`/api/rooms/${roomId}/members/${userId}`, {
-        method: "PATCH",
-        body:   JSON.stringify({ role: newRole }),
-      })
-      onMembersChange(
-        members.map((m) => m.user_id === userId ? { ...m, role: newRole } : m)
-      )
-    } catch (err) {
-      console.error("could not update role:", err)
-    }
-  }
-
-  const handleRemove = async (userId: string) => {
-    try {
-      await apiFetch(`/api/rooms/${roomId}/members/${userId}`, {
-        method: "DELETE",
-      })
-      onMembersChange(members.filter((m) => m.user_id !== userId))
-    } catch (err) {
-      console.error("could not remove member:", err)
-    }
-  }
 
   const handleInvite = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault()
@@ -75,7 +54,6 @@ export function Sidebar({
         method: "POST",
         body:   JSON.stringify({ email: inviteEmail.trim(), role: inviteRole }),
       })
-      // Add new member to local state immediately
       onMembersChange([...members, {
         user_id: data.user.id,
         name:    data.user.name,
@@ -113,37 +91,13 @@ export function Sidebar({
 
       <div className="sidebar-section">
         <div className="sidebar-label">Members</div>
-
-        {members.map((member) => (
-          <div key={member.user_id} className="sidebar-member">
-            <div className="sidebar-member-info">
-              <span className="sidebar-member-name">{member.name}</span>
-              {isOwner && member.role !== "owner" ? (
-                <select
-                  className="sidebar-role-select"
-                  value={member.role}
-                  onChange={(e) => handleRoleChange(member.user_id, e.target.value)}
-                >
-                  <option value="editor">editor</option>
-                  <option value="viewer">viewer</option>
-                </select>
-              ) : (
-                <span className={`sidebar-role sidebar-role--${member.role}`}>
-                  {member.role}
-                </span>
-              )}
-            </div>
-            {isOwner && member.role !== "owner" && (
-              <button
-                className="sidebar-remove"
-                onClick={() => handleRemove(member.user_id)}
-                title="Remove member"
-              >
-                ✕
-              </button>
-            )}
-          </div>
-        ))}
+        <MembersList
+          roomId={roomId}
+          members={members}
+          currentRole={currentRole}
+          onlineUsers={onlineUsers}
+          onMembersChange={onMembersChange}
+        />
 
         {isOwner && (
           <form className="sidebar-invite" onSubmit={handleInvite}>
