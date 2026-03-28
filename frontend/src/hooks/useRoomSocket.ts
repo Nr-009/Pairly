@@ -25,6 +25,10 @@ interface IncomingEvent {
   role?:    string
   name?:    string
   files?:   File[]
+  file_id?: string
+  output?:  string
+  exit_code?: number
+  reason?:  string
 }
 
 export interface OnlineUser {
@@ -72,6 +76,21 @@ export function useRoomSocket({
 
     ws.onmessage = (e) => {
       const event: IncomingEvent = JSON.parse(e.data)
+
+      if (event.type === "executing") {
+        console.log("[executing] file_id:", event.file_id)
+        return
+      }
+
+      if (event.type === "execution_done") {
+        console.log("[execution_done] file_id:", event.file_id, "exit_code:", event.exit_code, "output:", event.output)
+        return
+      }
+
+      if (event.type === "execution_error") {
+        console.log("[execution_error] file_id:", event.file_id, "reason:", event.reason)
+        return
+      }
 
       if (event.type === "room_deleted") {
         navigate("/dashboard")
@@ -155,5 +174,11 @@ export function useRoomSocket({
     }))
   }
 
-  return { onlineUsers }
+  const sendMessage = (msg: object) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify(msg))
+    }
+  }
+
+  return { onlineUsers, sendMessage }
 }

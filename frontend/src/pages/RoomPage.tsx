@@ -76,7 +76,7 @@ export default function RoomPage() {
   const currentName   = user?.name ?? user?.email ?? ""
   const currentColor  = currentUserId ? getUserColor(currentUserId) : "#fff"
 
-  const { onlineUsers } = useRoomSocket({
+  const { onlineUsers , sendMessage} = useRoomSocket({
     roomId:         roomId!,
     currentUserId,
     currentName,
@@ -172,6 +172,15 @@ export default function RoomPage() {
           )}
           <span className="room-active-file">{activeFile?.name ?? ""}</span>
           <span className="room-role" data-role={role}>{role}</span>
+          {activeFile && !activeFile.is_folder && (role === "owner" || role === "editor") && (
+          <button onClick={() => sendMessage({
+            type:         "run_file",
+            file_id:      activeFile.id,
+            execution_id: crypto.randomUUID(),
+          })}>
+          ▶ Run (test)
+          </button>)}
+          
           {role !== "owner" && (
             <button
               className="room-leave"

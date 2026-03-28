@@ -11,6 +11,8 @@ import (
 	_ "github.com/golang-migrate/migrate/v4/source/file"
 	"go.uber.org/zap"
 
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 	"parily.dev/app/internal/auth"
 	"parily.dev/app/internal/config"
 	"parily.dev/app/internal/health"
@@ -21,6 +23,7 @@ import (
 	"parily.dev/app/internal/redis"
 	"parily.dev/app/internal/rooms"
 	wshandler "parily.dev/app/internal/websocket"
+	pb "parily.dev/app/proto"
 )
 
 func main() {
@@ -68,6 +71,17 @@ func main() {
 		cfg.PostgresDB,
 	)
 
+	grpcConn, err := grpc.NewClient(
+		"executor:50051",
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
+	if err != nil {
+		logger.Log.Fatal("failed to connect to executor", zap.Error(err))
+	}
+	defer grpcConn.Close()
+	executorClient := pb.NewExecutorServiceClient(grpcConn)
+	logger.Log.Info("executor gRPC client connected")
+
 	m, err := migrate.New("file:///app/migrations", dsn)
 	if err != nil {
 		logger.Log.Fatal("Failed to initialize migrations", zap.Error(err))
@@ -87,7 +101,7 @@ func main() {
 
 	// ── Handlers ──────────────────────────────────────────────────────────────
 	wsHandler := wshandler.NewHandler(hub, pgPool, cfg, logger.Log)
-	roomHandler := wshandler.NewRoomHandler(roomHub, pgPool, cfg, logger.Log)
+	roomHandler := wshandler.NewRoomHandler(roomHub, pgPool, cfg, logger.Log, executorClient)
 	notifyHandler := wshandler.NewNotifyHandler(notifyHub, pgPool, cfg, logger.Log)
 	authHandler := auth.NewHandler(pgPool, cfg, logger.Log)
 	roomsHandler := rooms.NewHandler(pgPool, mongoDB, redisClient, notifyHub)

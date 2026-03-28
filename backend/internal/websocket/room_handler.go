@@ -1,33 +1,55 @@
 package websocket
 
 import (
+	"context"
+	"encoding/json"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	"parily.dev/app/internal/auth"
 	"parily.dev/app/internal/config"
 	pg "parily.dev/app/internal/postgres"
+	pb "parily.dev/app/proto"
 )
 
 type RoomHandler struct {
-	hub *RoomHub
-	db  *pgxpool.Pool
-	cfg *config.Config
-	log *zap.Logger
+	hub            *RoomHub
+	db             *pgxpool.Pool
+	cfg            *config.Config
+	log            *zap.Logger
+	executorClient pb.ExecutorServiceClient
 }
 
-func NewRoomHandler(hub *RoomHub, db *pgxpool.Pool, cfg *config.Config, log *zap.Logger) *RoomHandler {
-	return &RoomHandler{hub: hub, db: db, cfg: cfg, log: log}
+func NewRoomHandler(
+	hub *RoomHub,
+	db *pgxpool.Pool,
+	cfg *config.Config,
+	log *zap.Logger,
+	executorClient pb.ExecutorServiceClient,
+) *RoomHandler {
+	return &RoomHandler{
+		hub:            hub,
+		db:             db,
+		cfg:            cfg,
+		log:            log,
+		executorClient: executorClient,
+	}
 }
 
-// ServeRoom handles GET /ws/:roomId/room
-// Validates JWT, checks membership, upgrades to WebSocket, then:
-//   - registers the connection in RoomHub
-//   - reads incoming messages (heartbeats, future types) and publishes to Redis
-//   - Redis fans the message out to all connections in the room via RoomHub
+// incomingMessage is used only to peek at the type field
+// before deciding what to do with the message
+type incomingMessage struct {
+	Type        string `json:"type"`
+	FileID      string `json:"file_id"`
+	ExecutionID string `json:"execution_id"`
+}
+
 func (h *RoomHandler) ServeRoom(c *gin.Context) {
 	roomID := c.Param("roomId")
 
@@ -37,7 +59,7 @@ func (h *RoomHandler) ServeRoom(c *gin.Context) {
 		return
 	}
 
-	_, err = pg.GetMemberRole(c.Request.Context(), h.db, roomID, claims.UserID)
+	role, err := pg.GetMemberRole(c.Request.Context(), h.db, roomID, claims.UserID)
 	if err == pgx.ErrNoRows {
 		c.JSON(http.StatusForbidden, gin.H{"error": "not a member of this room"})
 		return
@@ -67,12 +89,73 @@ func (h *RoomHandler) ServeRoom(c *gin.Context) {
 			break
 		}
 
-		if err := h.hub.Publish(roomID, data); err != nil {
-			h.log.Error("room hub publish failed",
-				zap.String("room", roomID),
-				zap.String("user", claims.UserID),
-				zap.Error(err),
-			)
+		var msg incomingMessage
+		if err := json.Unmarshal(data, &msg); err != nil {
+			// not JSON — publish as-is (heartbeats etc.)
+			h.hub.Publish(roomID, data)
+			continue
+		}
+
+		switch msg.Type {
+		case "run_file":
+			h.handleRunFile(roomID, claims.UserID, claims.UserID, role, msg)
+		default:
+			// everything else (heartbeat, etc.) published to Redis as before
+			if err := h.hub.Publish(roomID, data); err != nil {
+				h.log.Error("room hub publish failed",
+					zap.String("room", roomID),
+					zap.String("user", claims.UserID),
+					zap.Error(err),
+				)
+			}
 		}
 	}
+}
+
+func (h *RoomHandler) handleRunFile(
+	roomID, userID, username, role string,
+	msg incomingMessage,
+) {
+	// only owners and editors can run code
+	if role != "owner" && role != "editor" {
+		event, _ := json.Marshal(map[string]string{
+			"type":    "execution_error",
+			"file_id": msg.FileID,
+			"reason":  "permission_denied",
+		})
+		h.hub.Publish(roomID, event)
+		return
+	}
+
+	// call executor — this returns quickly with OK or "already running"
+	// the actual execution happens async inside the executor
+	_, err := h.executorClient.Execute(context.Background(), &pb.ExecuteRequest{
+		ExecutionId: msg.ExecutionID,
+		RoomId:      roomID,
+		FileId:      msg.FileID,
+	})
+
+	if err != nil {
+		st, _ := status.FromError(err)
+		reason := "error"
+		if st.Code() == codes.ResourceExhausted {
+			reason = "already_running"
+		}
+		event, _ := json.Marshal(map[string]string{
+			"type":    "execution_error",
+			"file_id": msg.FileID,
+			"reason":  reason,
+		})
+		h.hub.Publish(roomID, event)
+		return
+	}
+
+	// gRPC returned OK — publish executing event so all clients start spinner
+	event, _ := json.Marshal(map[string]string{
+		"type":         "executing",
+		"file_id":      msg.FileID,
+		"room_id":      roomID,
+		"triggered_by": username,
+	})
+	h.hub.Publish(roomID, event)
 }

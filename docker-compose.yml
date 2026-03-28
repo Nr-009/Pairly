@@ -76,7 +76,24 @@ services:
       - VITE_API_URL=http://localhost:${SERVER_PORT}
     depends_on:
       - backend
-
+  executor:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.executor
+    container_name: parily_executor
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /tmp:/tmp
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
 volumes:
   postgres_data:
   mongo_data:
