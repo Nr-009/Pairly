@@ -2,8 +2,10 @@ package websocket
 
 import (
 	"sync"
+
 	"github.com/gorilla/websocket"
 	"go.uber.org/zap"
+	"parily.dev/app/internal/metrics"
 	"parily.dev/app/internal/redis"
 )
 
@@ -34,9 +36,11 @@ func (h *RoomHub) Register(conn *websocket.Conn, roomID string) {
 
 	if h.rooms[roomID] == nil {
 		h.rooms[roomID] = make(map[*websocket.Conn]bool)
+		metrics.ActiveRoomsTotal.Inc()
 	}
 	h.rooms[roomID][conn] = true
-
+	metrics.ActiveWebsocketConnections.Inc()
+	metrics.RoomJoinsTotal.Inc()
 	if h.subs[roomID] == nil {
 		h.subscribeRedis(roomID)
 	}
@@ -47,11 +51,12 @@ func (h *RoomHub) Unregister(conn *websocket.Conn, roomID string) {
 	defer h.mu.Unlock()
 
 	delete(h.rooms[roomID], conn)
-
+	metrics.ActiveWebsocketConnections.Dec()
 	if len(h.rooms[roomID]) == 0 {
 		if h.subs[roomID] != nil {
 			h.subs[roomID].Close()
 			delete(h.subs, roomID)
+			metrics.ActiveRoomsTotal.Dec()
 		}
 		delete(h.rooms, roomID)
 	}
@@ -59,7 +64,11 @@ func (h *RoomHub) Unregister(conn *websocket.Conn, roomID string) {
 
 // Publish sends a message to the room channel so Redis fans it out to all pods.
 func (h *RoomHub) Publish(roomID string, msg []byte) error {
-	return h.rdb.Publish("room:"+roomID+":room", msg)
+	if err := h.rdb.Publish("room:"+roomID+":room", msg); err != nil {
+    	metrics.RedisPublishErrorsTotal.Inc()
+    	return err
+	}
+return nil
 }
 
 func (h *RoomHub) subscribeRedis(roomID string) {

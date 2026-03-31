@@ -9,6 +9,9 @@ import (
 	"github.com/golang-migrate/migrate/v4"
 	_ "github.com/golang-migrate/migrate/v4/database/postgres"
 	_ "github.com/golang-migrate/migrate/v4/source/file"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"go.uber.org/zap"
 
 	"google.golang.org/grpc"
@@ -18,11 +21,13 @@ import (
 	"parily.dev/app/internal/health"
 	"parily.dev/app/internal/kafka"
 	"parily.dev/app/internal/logger"
+	"parily.dev/app/internal/metrics"
 	"parily.dev/app/internal/middleware"
 	mongoClient "parily.dev/app/internal/mongo"
 	"parily.dev/app/internal/postgres"
 	"parily.dev/app/internal/redis"
 	"parily.dev/app/internal/rooms"
+	"parily.dev/app/internal/tracing"
 	wshandler "parily.dev/app/internal/websocket"
 	pb "parily.dev/app/proto"
 )
@@ -32,6 +37,12 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
 	}
+	metrics.InitServer()
+	shutdown, err := tracing.Init("pairly-backend", cfg.JaegerEndpoint)
+	if err != nil {
+    	logger.Log.Fatal("failed to init tracing", zap.Error(err))
+	}
+	defer shutdown()
 
 	if err := logger.Init(cfg.Environment); err != nil {
 		log.Fatalf("Failed to initialize logger: %v", err)
@@ -78,8 +89,9 @@ func main() {
 	)
 
 	grpcConn, err := grpc.NewClient(
-		"executor:50051",
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+    	"executor:50051",
+    	grpc.WithTransportCredentials(insecure.NewCredentials()),
+    	grpc.WithStatsHandler(otelgrpc.NewClientHandler()),
 	)
 	if err != nil {
 		logger.Log.Fatal("failed to connect to executor", zap.Error(err))
@@ -115,6 +127,8 @@ func main() {
 	// ── Router ────────────────────────────────────────────────────────────────
 	r := gin.New()
 	r.Use(gin.Recovery())
+	r.Use(middleware.PrometheusMiddleware())
+	r.Use(otelgin.Middleware("pairly-backend"))
 	r.Use(cors.New(cors.Config{
 		AllowOrigins:     []string{"http://localhost:5173"},
 		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"},
@@ -145,6 +159,7 @@ func main() {
 	r.GET("/room-ws/:roomId", roomHandler.ServeRoom)
 	// WebSocket — user notification channel (dashboard only)
 	r.GET("/notify-ws", notifyHandler.ServeNotify)
+	r.GET("/metrics", gin.WrapH(promhttp.Handler()))
 
 	logger.Log.Info("Server listening", zap.String("port", cfg.ServerPort))
 	if err := r.Run(":" + cfg.ServerPort); err != nil {

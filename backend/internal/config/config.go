@@ -34,6 +34,8 @@ type Config struct {
 	GoogleClientSecret string
 	GoogleRedirectURL  string
 	KafkaBroker string
+	JaegerEndpoint string
+	MetricsPort string
 }
 
 func Load() (*Config, error) {
@@ -72,6 +74,8 @@ func Load() (*Config, error) {
 		GoogleClientSecret: viper.GetString("GOOGLE_CLIENT_SECRET"),
 		GoogleRedirectURL:  viper.GetString("GOOGLE_REDIRECT_URL"),
 		KafkaBroker: viper.GetString("KAFKA_BROKER"),
+		JaegerEndpoint: viper.GetString("JAEGER_ENDPOINT"),
+		MetricsPort: viper.GetString("METRICS_PORT"),
 	}
 
 	if cfg.ServerPort == "" {
@@ -107,6 +111,8 @@ func LoadExecutor() (*Config, error) {
     	RedisPort:     viper.GetString("REDIS_PORT"),
     	RedisPassword: viper.GetString("REDIS_PASSWORD"),
 		KafkaBroker: viper.GetString("KAFKA_BROKER"),
+		JaegerEndpoint: viper.GetString("JAEGER_ENDPOINT"),
+		MetricsPort: viper.GetString("METRICS_PORT"),
 	}
 
 	if cfg.PostgresHost == "" {

@@ -12,24 +12,24 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
 	ycrdt "github.com/skyterra/y-crdt"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	otelcodes "go.opentelemetry.io/otel/codes"
+	oteltrace "go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 
 	"parily.dev/app/internal/kafka"
 	"parily.dev/app/internal/logger"
+	"parily.dev/app/internal/metrics"
 	mongoRepo "parily.dev/app/internal/mongo"
 	pg "parily.dev/app/internal/postgres"
 )
 
-// lastTextCache stores the last saved text per fileID.
-// If incoming Yjs blob decodes to the same text, we skip both
-// MongoDB and Kafka — content hasn't changed so no point recording it.
 var (
 	lastTextCache   = make(map[string]string)
 	lastTextCacheMu sync.Mutex
 )
 
-// yjsBlobToText decodes a Yjs binary update into plain text.
-// Same key "content" used by the frontend useYjs hook.
 func yjsBlobToText(blob []byte) string {
 	doc := ycrdt.NewDoc("dedup", false, nil, nil, false)
 	doc.Transact(func(trans *ycrdt.Transaction) {
@@ -279,9 +279,7 @@ func (h *Handler) PermanentDeleteFile(c *gin.Context) {
 	docRepo := mongoRepo.NewDocumentRepository(h.mongoDB)
 	snapRepo := mongoRepo.NewSnapshotRepository(h.mongoDB)
 	for _, id := range fileIDs {
-		// delete Yjs document for this file
 		_ = docRepo.DeleteDocument(c.Request.Context(), id)
-		// delete all text snapshots for this file so we don't leave orphaned data
 		_ = snapRepo.DeleteSnapshotsByFile(c.Request.Context(), id)
 	}
 
@@ -290,7 +288,6 @@ func (h *Handler) PermanentDeleteFile(c *gin.Context) {
 		return
 	}
 
-	// evict from dedup cache when file is deleted
 	lastTextCacheMu.Lock()
 	delete(lastTextCache, fileID)
 	lastTextCacheMu.Unlock()
@@ -304,12 +301,25 @@ func (h *Handler) SaveState(c *gin.Context) {
 	fileID := c.Param("fileID")
 	userID := c.GetString("userID")
 
-	role, err := pg.GetMemberRole(c.Request.Context(), h.db, roomID, userID)
+	// start span early so all operations inside are children
+	tracer := otel.Tracer("pairly")
+	ctx, span := tracer.Start(c.Request.Context(), "SaveState",
+		oteltrace.WithAttributes(
+			attribute.String("room.id", roomID),
+			attribute.String("file.id", fileID),
+			attribute.String("user.id", userID),
+		),
+	)
+	defer span.End()
+
+	role, err := pg.GetMemberRole(ctx, h.db, roomID, userID)
 	if err == pgx.ErrNoRows {
 		c.JSON(http.StatusForbidden, gin.H{"error": "not a member of this room"})
 		return
 	}
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(otelcodes.Error, err.Error())
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
 		return
 	}
@@ -318,8 +328,10 @@ func (h *Handler) SaveState(c *gin.Context) {
 		return
 	}
 
-	existing, err := pg.GetFileByID(c.Request.Context(), h.db, fileID)
+	existing, err := pg.GetFileByID(ctx, h.db, fileID)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(otelcodes.Error, err.Error())
 		c.JSON(http.StatusNotFound, gin.H{"error": "file not found"})
 		return
 	}
@@ -334,14 +346,14 @@ func (h *Handler) SaveState(c *gin.Context) {
 		return
 	}
 
-	// decode incoming Yjs blob to plain text and compare with last saved text
-	// if identical — content hasn't changed, skip MongoDB, Kafka, and snapshot entirely
 	incomingText := yjsBlobToText(state)
 
 	lastTextCacheMu.Lock()
 	lastText, exists := lastTextCache[fileID]
 	if exists && lastText == incomingText {
 		lastTextCacheMu.Unlock()
+		metrics.YjsSavesSkippedTotal.Inc()
+		span.SetAttributes(attribute.Bool("save.skipped", true))
 		logger.Log.Info("skipping save — content unchanged", zap.String("file_id", fileID))
 		c.JSON(http.StatusOK, gin.H{"message": "saved"})
 		return
@@ -349,29 +361,31 @@ func (h *Handler) SaveState(c *gin.Context) {
 	lastTextCache[fileID] = incomingText
 	lastTextCacheMu.Unlock()
 
-	// content changed — save Yjs binary to MongoDB, get back the new version number
 	docRepo := mongoRepo.NewDocumentRepository(h.mongoDB)
-	version, err := docRepo.SaveDocument(c.Request.Context(), fileID, state)
+	version, err := docRepo.SaveDocument(ctx, fileID, state)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(otelcodes.Error, err.Error())
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not save state"})
 		return
 	}
+	metrics.YjsSavesTotal.Inc()
+	span.SetAttributes(
+		attribute.Bool("save.skipped", false),
+		attribute.Int("version", version),
+	)
 
-	// capture these for use inside goroutines — avoid closing over loop variables
 	capturedText := incomingText
 	capturedVersion := version
 
-	// publish Yjs blob + metadata to Kafka async
-	// using context.Background() + timeout — never the request context which
-	// cancels the moment we return the HTTP response
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		gctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		logger.Log.Info("publishing edit event to kafka",
 			zap.String("file_id", fileID),
 			zap.Int("version", capturedVersion),
 		)
-		if err := h.kafka.PublishEditEvent(ctx, kafka.EditEvent{
+		if err := h.kafka.PublishEditEvent(gctx, kafka.EditEvent{
 			RoomID:  roomID,
 			FileID:  fileID,
 			UserID:  userID,
@@ -380,22 +394,18 @@ func (h *Handler) SaveState(c *gin.Context) {
 			SavedAt: time.Now().UTC(),
 		}); err != nil {
 			logger.Log.Error("failed to publish edit event", zap.Error(err))
-			 // publish to dead letter so we have a record of what failed and why
-    		// we already have `state` (the raw Yjs blob) in scope — that's the payload
-			_ = h.kafka.PublishDeadLetter(ctx, "edit-events", state, err.Error())
+			_ = h.kafka.PublishDeadLetter(gctx, "edit-events", state, err.Error())
+			metrics.KafkaPublishErrorsTotal.WithLabelValues("edit-events").Inc()
 		} else {
 			logger.Log.Info("edit event published successfully", zap.String("file_id", fileID))
 		}
 	}()
 
-	// save plain text snapshot to MongoDB async — text is already decoded above
-	// so this goroutine does zero decoding work, just one MongoDB write
-	// GetHistoryAtVersion checks this collection first before falling back to Kafka replay
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		gctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		snapRepo := mongoRepo.NewSnapshotRepository(h.mongoDB)
-		if err := snapRepo.SaveSnapshot(ctx, fileID, roomID, capturedVersion, capturedText); err != nil {
+		if err := snapRepo.SaveSnapshot(gctx, fileID, roomID, capturedVersion, capturedText); err != nil {
 			logger.Log.Error("failed to save snapshot",
 				zap.String("file_id", fileID),
 				zap.Int("version", capturedVersion),
@@ -416,17 +426,33 @@ func (h *Handler) LoadState(c *gin.Context) {
 	roomID := c.Param("roomID")
 	fileID := c.Param("fileID")
 	userID := c.GetString("userID")
-	_, err := pg.GetMemberRole(c.Request.Context(), h.db, roomID, userID)
+
+	tracer := otel.Tracer("pairly")
+	ctx, span := tracer.Start(c.Request.Context(), "LoadState",
+		oteltrace.WithAttributes(
+			attribute.String("room.id", roomID),
+			attribute.String("file.id", fileID),
+			attribute.String("user.id", userID),
+		),
+	)
+	defer span.End()
+
+	_, err := pg.GetMemberRole(ctx, h.db, roomID, userID)
 	if err == pgx.ErrNoRows {
 		c.JSON(http.StatusForbidden, gin.H{"error": "not a member of this room"})
 		return
 	}
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(otelcodes.Error, err.Error())
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
 		return
 	}
-	existing, err := pg.GetFileByID(c.Request.Context(), h.db, fileID)
+
+	existing, err := pg.GetFileByID(ctx, h.db, fileID)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(otelcodes.Error, err.Error())
 		c.JSON(http.StatusNotFound, gin.H{"error": "file not found"})
 		return
 	}
@@ -434,16 +460,26 @@ func (h *Handler) LoadState(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "folders do not have state"})
 		return
 	}
+
 	docRepo := mongoRepo.NewDocumentRepository(h.mongoDB)
-	doc, err := docRepo.LoadDocument(c.Request.Context(), fileID)
+	doc, err := docRepo.LoadDocument(ctx, fileID)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(otelcodes.Error, err.Error())
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not load state"})
 		return
 	}
 	if doc == nil || len(doc.YjsState) == 0 {
+		span.SetAttributes(attribute.Bool("state.empty", true))
 		c.Status(http.StatusNoContent)
 		return
 	}
+
+	span.SetAttributes(
+		attribute.Bool("state.empty", false),
+		attribute.Int("state.size_bytes", len(doc.YjsState)),
+		attribute.Int("version", doc.Version),
+	)
 	c.Data(http.StatusOK, "application/octet-stream", doc.YjsState)
 }
 

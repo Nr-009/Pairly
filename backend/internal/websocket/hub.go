@@ -6,6 +6,7 @@ import (
 	"github.com/gorilla/websocket"
 	"go.uber.org/zap"
 
+	"parily.dev/app/internal/metrics"
 	"parily.dev/app/internal/redis"
 )
 
@@ -39,7 +40,7 @@ func (h *Hub) Register(conn *websocket.Conn, roomID, fileID string) {
 		h.rooms[key] = make(map[*websocket.Conn]bool)
 	}
 	h.rooms[key][conn] = true
-
+	metrics.ActiveWebsocketConnections.Inc()
 	if h.subs[key] == nil {
 		h.subscribeRedis(key)
 	}
@@ -51,7 +52,7 @@ func (h *Hub) Unregister(conn *websocket.Conn, roomID, fileID string) {
 	defer h.mu.Unlock()
 
 	delete(h.rooms[key], conn)
-
+	metrics.ActiveWebsocketConnections.Dec()
 	if len(h.rooms[key]) == 0 {
 		if h.subs[key] != nil {
 			h.subs[key].Close()
@@ -65,6 +66,7 @@ func (h *Hub) Broadcast(sender *websocket.Conn, roomID, fileID string, msgType i
 	key := channelKey(roomID, fileID)
 	if err := h.rdb.Publish(key, data); err != nil {
 		h.log.Error("redis publish failed", zap.Error(err))
+		metrics.RedisPublishErrorsTotal.Inc()
 	}
 }
 

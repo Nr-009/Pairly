@@ -11,4 +11,5 @@ RUN apk add --no-cache ca-certificates
 WORKDIR /app
 COPY --from=builder /app/bin/executor .
 EXPOSE 50051
+EXPOSE 2112
 CMD ["./executor"]

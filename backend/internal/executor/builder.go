@@ -11,6 +11,10 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.mongodb.org/mongo-driver/mongo"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	otelcodes "go.opentelemetry.io/otel/codes"
+	oteltrace "go.opentelemetry.io/otel/trace"
 
 	mongoRepo "parily.dev/app/internal/mongo"
 	pg "parily.dev/app/internal/postgres"
@@ -29,8 +33,26 @@ func ReconstructFileTree(
 	executionID string,
 	fileID string,
 ) (string, string, string, error) {
+
+	// parent span for the entire file tree reconstruction
+	// child spans show exactly where time is spent — Postgres vs Yjs decode
+	tracer := otel.Tracer("pairly")
+	ctx, span := tracer.Start(ctx, "ReconstructFileTree",
+		oteltrace.WithAttributes(
+			attribute.String("room.id", roomID),
+			attribute.String("file.id", fileID),
+			attribute.String("execution.id", executionID),
+		),
+	)
+	defer span.End()
+
+	// child span — Postgres fetch
+	_, fetchSpan := tracer.Start(ctx, "FetchFilesFromPostgres")
 	allFiles, err := pg.GetFilesForRoom(ctx, db, roomID)
+	fetchSpan.End()
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(otelcodes.Error, err.Error())
 		return "", "", "", fmt.Errorf("fetch files: %w", err)
 	}
 
@@ -46,6 +68,12 @@ func ReconstructFileTree(
 	}
 	log.Printf("[builder] fetched %d total files, %d active, entry language=%s", len(allFiles), len(files), entryLanguage)
 
+	span.SetAttributes(
+		attribute.Int("files.total", len(allFiles)),
+		attribute.Int("files.active", len(files)),
+		attribute.String("language", entryLanguage),
+	)
+
 	var (
 		contentMap sync.Map
 		wg         sync.WaitGroup
@@ -54,6 +82,14 @@ func ReconstructFileTree(
 	)
 
 	docRepo := mongoRepo.NewDocumentRepository(mongoDB)
+
+	// child span — concurrent Yjs decode across all files
+	// duration shows total wall time for the goroutine pool
+	_, decodeSpan := tracer.Start(ctx, "DecodeYjsConcurrent",
+		oteltrace.WithAttributes(
+			attribute.Int("file.count", len(files)),
+		),
+	)
 
 	for _, f := range files {
 		if f.IsFolder {
@@ -96,14 +132,19 @@ func ReconstructFileTree(
 	printTree(roots, "  ")
 
 	wg.Wait()
+	decodeSpan.End()
 	log.Printf("[builder] all files decoded")
 
 	if fetchErr != nil {
+		span.RecordError(fetchErr)
+		span.SetStatus(otelcodes.Error, fetchErr.Error())
 		return "", "", "", fetchErr
 	}
 
 	tempDir := fmt.Sprintf("/tmp/exec-%s", executionID)
 	if err := os.MkdirAll(tempDir, 0755); err != nil {
+		span.RecordError(err)
+		span.SetStatus(otelcodes.Error, err.Error())
 		return "", "", "", fmt.Errorf("create temp dir: %w", err)
 	}
 	log.Printf("[builder] created temp dir: %s", tempDir)
@@ -111,6 +152,8 @@ func ReconstructFileTree(
 	var entryPath string
 	if err := walkTree(roots, tempDir, &contentMap, fileID, &entryPath); err != nil {
 		os.RemoveAll(tempDir)
+		span.RecordError(err)
+		span.SetStatus(otelcodes.Error, err.Error())
 		return "", "", "", err
 	}
 

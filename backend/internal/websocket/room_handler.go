@@ -8,10 +8,13 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	otelcodes "go.opentelemetry.io/otel/codes"
+	oteltrace "go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-
 	"parily.dev/app/internal/auth"
 	"parily.dev/app/internal/config"
 	pg "parily.dev/app/internal/postgres"
@@ -116,6 +119,15 @@ func (h *RoomHandler) handleRunFile(
 	roomID, userID, username, role string,
 	msg incomingMessage,
 ) {
+	tracer := otel.Tracer("pairly")
+	ctx, span := tracer.Start(context.Background(), "handleRunFile",
+    oteltrace.WithAttributes(
+        attribute.String("room.id", roomID),
+        attribute.String("file.id", msg.FileID),
+        attribute.String("user.id", userID),
+    ),
+	)
+	defer span.End()
 	// only owners and editors can run code
 	if role != "owner" && role != "editor" {
 		event, _ := json.Marshal(map[string]string{
@@ -129,13 +141,15 @@ func (h *RoomHandler) handleRunFile(
 
 	// call executor — this returns quickly with OK or "already running"
 	// the actual execution happens async inside the executor
-	_, err := h.executorClient.Execute(context.Background(), &pb.ExecuteRequest{
+	_, err := h.executorClient.Execute(ctx, &pb.ExecuteRequest{
 		ExecutionId: msg.ExecutionID,
 		RoomId:      roomID,
 		FileId:      msg.FileID,
 	})
 
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(otelcodes.Error, err.Error())
 		st, _ := status.FromError(err)
 		reason := "error"
 		if st.Code() == codes.ResourceExhausted {

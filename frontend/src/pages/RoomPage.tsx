@@ -253,7 +253,7 @@ export default function RoomPage() {
               onClick={() => setShowHistory(v => !v)}
               title="Version History"
             >
-              🕐 History
+              History
             </button>
           )}
           <span className="room-user">{user?.email}</span>
