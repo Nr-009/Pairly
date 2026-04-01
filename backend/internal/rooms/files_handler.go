@@ -6,7 +6,6 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -25,10 +24,6 @@ import (
 	pg "parily.dev/app/internal/postgres"
 )
 
-var (
-	lastTextCache   = make(map[string]string)
-	lastTextCacheMu sync.Mutex
-)
 
 func yjsBlobToText(blob []byte) string {
 	doc := ycrdt.NewDoc("dedup", false, nil, nil, false)
@@ -288,10 +283,6 @@ func (h *Handler) PermanentDeleteFile(c *gin.Context) {
 		return
 	}
 
-	lastTextCacheMu.Lock()
-	delete(lastTextCache, fileID)
-	lastTextCacheMu.Unlock()
-
 	h.publishFiles(c.Request.Context(), roomID)
 	c.JSON(http.StatusOK, gin.H{"message": "permanently deleted"})
 }
@@ -348,18 +339,15 @@ func (h *Handler) SaveState(c *gin.Context) {
 
 	incomingText := yjsBlobToText(state)
 
-	lastTextCacheMu.Lock()
-	lastText, exists := lastTextCache[fileID]
-	if exists && lastText == incomingText {
-		lastTextCacheMu.Unlock()
-		metrics.YjsSavesSkippedTotal.Inc()
-		span.SetAttributes(attribute.Bool("save.skipped", true))
-		logger.Log.Info("skipping save — content unchanged", zap.String("file_id", fileID))
-		c.JSON(http.StatusOK, gin.H{"message": "saved"})
-		return
+	snapRepo := mongoRepo.NewSnapshotRepository(h.mongoDB)
+	latest, err := snapRepo.GetLatestSnapshot(ctx, fileID)
+	if err == nil && latest != nil && latest.Text == incomingText {
+    	metrics.YjsSavesSkippedTotal.Inc()
+    	span.SetAttributes(attribute.Bool("save.skipped", true))
+    	logger.Log.Info("skipping save — content unchanged", zap.String("file_id", fileID))
+    	c.JSON(http.StatusOK, gin.H{"message": "saved"})
+    	return
 	}
-	lastTextCache[fileID] = incomingText
-	lastTextCacheMu.Unlock()
 
 	docRepo := mongoRepo.NewDocumentRepository(h.mongoDB)
 	version, err := docRepo.SaveDocument(ctx, fileID, state)

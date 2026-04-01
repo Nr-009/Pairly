@@ -85,3 +85,17 @@ func (r *SnapshotRepository) DeleteSnapshotsByRoom(ctx context.Context, roomID s
 	}
 	return nil
 }
+
+// internal/mongo/snapshots.go — add this method
+func (r *SnapshotRepository) GetLatestSnapshot(ctx context.Context, fileID string) (*FileSnapshot, error) {
+    opts := options.FindOne().SetSort(bson.M{"version": -1})
+    var snap FileSnapshot
+    err := r.col.FindOne(ctx, bson.M{"file_id": fileID}, opts).Decode(&snap)
+    if err == mongo.ErrNoDocuments {
+        return nil, nil
+    }
+    if err != nil {
+        return nil, fmt.Errorf("get latest snapshot: %w", err)
+    }
+    return &snap, nil
+}

@@ -141,7 +141,7 @@ func main() {
 	r.Use(middleware.PrometheusMiddleware())
 	r.Use(otelgin.Middleware("pairly-backend"))
 	r.Use(cors.New(cors.Config{
-		AllowOrigins:     []string{"http://localhost:5173"},
+		AllowOrigins:     []string{"http://localhost:5173", "http://127.0.0.1:5173",},
 		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"},
 		AllowHeaders:     []string{"Content-Type"},
 		AllowCredentials: true,
