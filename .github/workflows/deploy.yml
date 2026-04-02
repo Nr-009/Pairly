@@ -29,10 +29,10 @@ jobs:
           go test ./...
 
       - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v4
+        uses: golangci/golangci-lint-action@v9
         with:
           working-directory: backend
-          version: v2.11.0
+          version: v2.11
 
   # ── Build + Push Images ──────────────────────────────────────────────────────
   build:
