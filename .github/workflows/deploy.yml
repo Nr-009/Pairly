@@ -24,7 +24,9 @@ jobs:
 
       - name: Run tests
         working-directory: backend
-        run: go test ./...
+        run: |
+          go mod tidy
+          go test ./...
 
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v4
